@@ -1,6 +1,11 @@
+import os
 import streamlit as st
-from transcript_extractor import extract_video_id, get_transcript_text
-from summarizer import generate_summary
+from transcript_extractor import (
+    extract_video_id,
+    get_transcript_text,
+    download_audio_fallback,
+)
+from summarizer import generate_summary, generate_summary_from_audio
 
 st.set_page_config(page_title="AI YouTube Summarizer", page_icon="🎬", layout="wide")
 
@@ -34,20 +39,46 @@ if st.button("✨ Summarize Video", type="primary"):
                 st.video(video_url)
             
             with col2:
-                with st.spinner("⏳ Extracting transcript and generating summary..."):
-                    transcript_text, raw_data = get_transcript_text(video_id)
+                summary = None
+                with st.spinner("⏳ Checking for native video transcript..."):
+                    transcript_text, _ = get_transcript_text(video_id)
+                
+                # Case 1: Video has subtitles
+                if transcript_text:
+                    with st.spinner("🤖 Generating summary with Gemini..."):
+                        try:
+                            summary = generate_summary(transcript_text, summary_type)
+                        except Exception as e:
+                            st.error(f"Error generating summary: {e}")
+                
+                # Case 2: No subtitles -> Audio fallback via Gemini File API
+                else:
+                    st.info("ℹ️ No native subtitles found. Falling back to direct audio processing...")
                     
-                    if not transcript_text:
-                        st.error("❌ No subtitles/transcripts found for this video. Consider enabling audio transcription fallback.")
+                    with st.spinner("📥 Extracting audio stream from video..."):
+                        audio_file = download_audio_fallback(video_url)
+                    
+                    if audio_file and os.path.exists(audio_file):
+                        try:
+                            with st.spinner("🎙️ Uploading and analyzing audio with Gemini..."):
+                                summary = generate_summary_from_audio(audio_file, summary_type)
+                        except Exception as e:
+                            st.error(f"Audio processing error: {e}")
+                        finally:
+                            # Clean up temporary audio file locally
+                            if os.path.exists(audio_file):
+                                os.remove(audio_file)
                     else:
-                        summary = generate_summary(transcript_text, summary_type)
-                        st.success("✅ Summary Generated!")
-                        st.markdown(summary)
-                        
-                        # Download Button
-                        st.download_button(
-                            label="📥 Download Summary as Markdown",
-                            data=summary,
-                            file_name=f"summary_{video_id}.md",
-                            mime="text/markdown"
-                        )
+                        st.error("❌ Could not extract subtitles or download audio for this video.")
+
+                # Render summary and download button if generated
+                if summary:
+                    st.success("✅ Summary Generated!")
+                    st.markdown(summary)
+                    
+                    st.download_button(
+                        label="📥 Download Summary as Markdown",
+                        data=summary,
+                        file_name=f"summary_{video_id}.md",
+                        mime="text/markdown"
+                    )
