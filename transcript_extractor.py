@@ -1,4 +1,6 @@
+import os
 import re
+import yt_dlp
 from youtube_transcript_api import (
     YouTubeTranscriptApi,
     TranscriptsDisabled,
@@ -7,7 +9,6 @@ from youtube_transcript_api import (
 )
 
 def extract_video_id(url: str) -> str | None:
-    """Extracts YouTube video ID from various URL formats."""
     patterns = [
         r"(?:v=|\/)([0-9A-Za-z_-]{11}).*",
         r"(?:embed\/)([0-9A-Za-z_-]{11})",
@@ -20,16 +21,11 @@ def extract_video_id(url: str) -> str | None:
     return None
 
 def get_transcript_text(video_id: str) -> tuple[str | None, list | None]:
-    """
-    Fetches transcript from YouTube in its native format.
-    Returns:
-        (full_text_string, raw_transcript_list_with_timestamps) or (None, None)
-    """
+    """Fetches native transcript if available."""
     try:
         api = YouTubeTranscriptApi() if callable(YouTubeTranscriptApi) else YouTubeTranscriptApi
         raw_data = None
 
-        # Strategy 1: Fetch via instance or class get_transcript
         if hasattr(api, "get_transcript"):
             try:
                 raw_data = api.get_transcript(video_id)
@@ -41,44 +37,31 @@ def get_transcript_text(video_id: str) -> tuple[str | None, list | None]:
             except Exception:
                 pass
 
-        # Strategy 2: Fetch via list() iteration
-        if raw_data is None and hasattr(api, "list"):
-            try:
-                transcript_list = api.list(video_id)
-                for transcript in transcript_list:
-                    raw_data = transcript.fetch()
-                    if raw_data:
-                        break
-            except Exception:
-                pass
-
-        # Strategy 3: Direct fetch method
-        if raw_data is None and hasattr(api, "fetch"):
-            try:
-                raw_data = api.fetch(video_id)
-            except Exception:
-                pass
-
         if not raw_data:
             return None, None
 
-        # Extract text snippets
-        text_parts = []
-        for item in raw_data:
-            if isinstance(item, dict):
-                text_parts.append(item.get("text", ""))
-            elif hasattr(item, "text"):
-                text_parts.append(getattr(item, "text", ""))
-            else:
-                text_parts.append(str(item))
-
-        full_text = " ".join(text_parts).strip()
-        return full_text, raw_data
+        text_parts = [item.get("text", "") for item in raw_data if isinstance(item, dict)]
+        return " ".join(text_parts).strip(), raw_data
 
     except (TranscriptsDisabled, NoTranscriptFound, CouldNotRetrieveTranscript):
         return None, None
-    except Exception as e:
-        error_msg = str(e).lower()
-        if "not translatable" in error_msg or "could not retrieve" in error_msg:
-            return None, None
-        raise RuntimeError(f"Error fetching transcript: {e}")
+    except Exception:
+        return None, None
+
+def download_audio_fallback(youtube_url: str, output_path: str = "temp_audio.mp3") -> str | None:
+    """Downloads low-bitrate audio from YouTube as a fallback."""
+    ydl_opts = {
+        'format': 'ba[ext=m4a]/ba',
+        'outtmpl': output_path,
+        'overwrites': True,
+        'quiet': True,
+        'no_warnings': True,
+    }
+    try:
+        if os.path.exists(output_path):
+            os.remove(output_path)
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([youtube_url])
+        return output_path if os.path.exists(output_path) else None
+    except Exception:
+        return None
