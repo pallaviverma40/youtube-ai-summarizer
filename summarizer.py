@@ -8,58 +8,105 @@ from google.genai.errors import ServerError, ClientError
 
 load_dotenv()
 
-# Check Streamlit Cloud secrets first; fall back to local .env
-api_key = None
-try:
-    api_key = st.secrets.get("GEMINI_API_KEY", os.getenv("GEMINI_API_KEY"))
-except Exception:
-    api_key = os.getenv("GEMINI_API_KEY")
+# Preferred models in priority order
+DEFAULT_MODELS = [
+    "gemini-3.1-pro-preview",
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
+    "gemini-1.5-flash",
+    "gemini-1.5-pro",
+]
 
-if not api_key:
-    raise ValueError(
-        "GEMINI_API_KEY missing! Set it in Streamlit Cloud Secrets or your local .env file."
-    )
-
-client = genai.Client(api_key=api_key)
-
-PROMPT_TEMPLATE = """
+BASE_PROMPT_TEMPLATE = """
 You are an expert content analyst and summarizer.
-Analyze the following YouTube video transcript and generate a structured summary with:
+Analyze the following YouTube video content and generate a well-structured, clear summary:
 
 1. 📌 **Executive Summary (TL;DR)**: A concise 2-3 sentence overview.
-2. 🎯 **Key Takeaways & Core Concepts**: Bullet points explaining the main arguments or lessons.
-3. ⏱️ **Timestamped Chapter Highlights**: Logical flow of the video.
-4. 💡 **Actionable Insights / Practical Advice**: Key lessons or steps viewers can apply.
+2. 🎯 **Key Takeaways & Core Concepts**: Bullet points explaining the main arguments, insights, or lessons.
+3. ⏱️ **Timestamped Chapter Highlights**: Logical flow of the video topic-by-topic.
+4. 💡 **Actionable Insights / Practical Advice**: Key lessons or actionable steps viewers can apply.
 
-Transcript:
-{transcript}
+{content_section}
 """
 
-def generate_summary(transcript_text: str, summary_type: str = "Detailed") -> str:
-    """Generates summary using Gemini with fallback models and retry backoff on 503."""
+SYSTEM_INSTRUCTION = (
+    "You provide accurate, well-formatted markdown summaries of video content. "
+    "Avoid filler words. Keep formatting clean with emojis, bold headers, and concise bullet points."
+)
 
-    system_instruction = (
-        "You provide accurate, well-formatted markdown summaries of video transcripts. "
-        "Avoid filler words. Keep formatting clean with emojis and bold headers."
-    )
 
-    prompt = PROMPT_TEMPLATE.format(transcript=transcript_text)
+def get_client() -> genai.Client:
+    """Retrieves API key and returns an initialized Gemini client."""
+    api_key = None
+    try:
+        api_key = st.secrets.get("GEMINI_API_KEY", os.getenv("GEMINI_API_KEY"))
+    except Exception:
+        api_key = os.getenv("GEMINI_API_KEY")
+
+    if not api_key:
+        raise ValueError(
+            "GEMINI_API_KEY missing! Set it in Streamlit Cloud Secrets, your local .env file, or the sidebar input."
+        )
+
+    return genai.Client(api_key=api_key)
+
+
+def get_candidate_models(client: genai.Client) -> list[str]:
+    """
+    Discovers available Gemini models for the user's API key,
+    prioritizing active models and falling back to known defaults.
+    """
+    try:
+        discovered = []
+        for m in client.models.list():
+            raw_name = getattr(m, "name", "") or ""
+            clean_name = raw_name.replace("models/", "")
+            actions = getattr(m, "supported_actions", []) or []
+            if "generateContent" in actions or "gemini" in clean_name.lower():
+                discovered.append(clean_name)
+
+        if not discovered:
+            return DEFAULT_MODELS
+
+        # Order by preference
+        ordered = [m for m in DEFAULT_MODELS if m in discovered]
+        remaining = [m for m in discovered if "gemini" in m.lower() and m not in ordered]
+        result = ordered + remaining
+        return result if result else DEFAULT_MODELS
+    except Exception:
+        return DEFAULT_MODELS
+
+
+def _build_prompt(content_str: str, summary_type: str, is_audio: bool = False) -> str:
+    """Builds prompt with appropriate format constraints."""
+    if is_audio:
+        content_section = "Audio recording provided above."
+    else:
+        content_section = f"Transcript:\n{content_str}"
+
+    prompt = BASE_PROMPT_TEMPLATE.format(content_section=content_section)
 
     if summary_type == "Quick TL;DR (1 Minute Read)":
         prompt += "\nFormat constraint: Keep the entire output under 150 words."
     elif summary_type == "Bullet Points Only":
         prompt += "\nFormat constraint: Present the entire summary in concise bullet points only."
 
-    config = types.GenerateContentConfig(
-        system_instruction=system_instruction,
-        temperature=0.3
-    )
+    return prompt
 
-    candidate_models = [
-        "gemini-2.5-flash",
-        "gemini-2.5-pro",
-        "gemini-3.6-flash",
-    ]
+
+def generate_summary(transcript_text: str, summary_type: str = "Detailed") -> str:
+    """Generates summary from transcript text using Gemini with dynamic model fallbacks."""
+    if not transcript_text or not transcript_text.strip():
+        raise ValueError("Transcript text is empty. Cannot generate summary.")
+
+    client = get_client()
+    candidate_models = get_candidate_models(client)
+    prompt = _build_prompt(transcript_text, summary_type, is_audio=False)
+
+    config = types.GenerateContentConfig(
+        system_instruction=SYSTEM_INSTRUCTION,
+        temperature=0.3,
+    )
 
     last_error = None
 
@@ -69,7 +116,7 @@ def generate_summary(transcript_text: str, summary_type: str = "Detailed") -> st
                 response = client.models.generate_content(
                     model=model_name,
                     contents=prompt,
-                    config=config
+                    config=config,
                 )
                 if response.text:
                     return response.text
@@ -84,51 +131,49 @@ def generate_summary(transcript_text: str, summary_type: str = "Detailed") -> st
                 last_error = e
                 break
 
-    raise RuntimeError(
-        f"Google servers are experiencing temporary high demand (503). "
-        f"Please wait 10-15 seconds and try again. Details: {last_error}"
-    )
+    raise RuntimeError(f"Unable to generate summary. Last error: {last_error}")
+
 
 def generate_summary_from_audio(audio_path: str, summary_type: str = "Detailed") -> str:
-    """Uploads downloaded audio to Gemini File API and generates a structured summary."""
+    """Uploads audio to Gemini File API, waits for processing, and generates summary."""
+    if not audio_path or not os.path.exists(audio_path):
+        raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
-    system_instruction = (
-        "You provide accurate, well-formatted markdown summaries of spoken audio. "
-        "Avoid filler words. Keep formatting clean with emojis and bold headers."
-    )
-
-    prompt = (
-        "Analyze the spoken content of this audio recording and generate a structured summary with:\n"
-        "1. 📌 **Executive Summary (TL;DR)**\n"
-        "2. 🎯 **Key Takeaways & Core Concepts**\n"
-        "3. ⏱️ **Timestamped Chapter Highlights**\n"
-        "4. 💡 **Actionable Insights / Practical Advice**"
-    )
-
-    if summary_type == "Quick TL;DR (1 Minute Read)":
-        prompt += "\nFormat constraint: Keep output under 150 words."
-    elif summary_type == "Bullet Points Only":
-        prompt += "\nFormat constraint: Present the entire summary in concise bullet points only."
+    client = get_client()
+    candidate_models = get_candidate_models(client)
+    prompt = _build_prompt("", summary_type, is_audio=True)
 
     config = types.GenerateContentConfig(
-        system_instruction=system_instruction,
-        temperature=0.3
+        system_instruction=SYSTEM_INSTRUCTION,
+        temperature=0.3,
     )
 
-    # Upload local audio directly to Gemini File API
-    audio_file = client.files.upload(file=audio_path)
-
+    audio_file = None
     try:
-        candidate_models = ["gemini-2.5-flash", "gemini-2.5-pro"]
-        last_error = None
+        # 1. Upload audio to Gemini File API
+        audio_file = client.files.upload(file=audio_path)
 
+        # 2. Wait for Gemini to finish audio processing (state == ACTIVE)
+        max_wait_seconds = 60
+        start_time = time.time()
+        while audio_file.state.name == "PROCESSING":
+            if time.time() - start_time > max_wait_seconds:
+                raise TimeoutError("Timed out waiting for Gemini to process the audio file.")
+            time.sleep(3)
+            audio_file = client.files.get(name=audio_file.name)
+
+        if audio_file.state.name == "FAILED":
+            raise RuntimeError(f"Gemini audio processing failed: {audio_file.error}")
+
+        # 3. Generate content with model fallbacks
+        last_error = None
         for model_name in candidate_models:
             for attempt in range(2):
                 try:
                     response = client.models.generate_content(
                         model=model_name,
                         contents=[audio_file, prompt],
-                        config=config
+                        config=config,
                     )
                     if response.text:
                         return response.text
@@ -140,11 +185,12 @@ def generate_summary_from_audio(audio_path: str, summary_type: str = "Detailed")
                     last_error = e
                     break
 
-        raise RuntimeError(f"Audio processing failed across models: {last_error}")
+        raise RuntimeError(f"Audio summarization failed across candidate models: {last_error}")
 
     finally:
-        # Delete file from Gemini cloud storage to keep storage clean
-        try:
-            client.files.delete(name=audio_file.name)
-        except Exception:
-            pass
+        # Clean up the file from Gemini storage
+        if audio_file and hasattr(audio_file, "name"):
+            try:
+                client.files.delete(name=audio_file.name)
+            except Exception:
+                pass

@@ -1,6 +1,27 @@
+# Virtual Environment
 venv/
+.venv/
+env/
+
+# Sensitive Credentials & Local Secrets
 .env
+.streamlit/secrets.toml
+
+# Python Cache & Bytecode
 __pycache__/
+*.py[cod]
+*$py.class
+*.pytest_cache/
+
+# Audio Files & Downloads
 *.mp3
 *.m4a
 *.webm
+*.wav
+*.ogg
+
+# Operating System & IDE Files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
