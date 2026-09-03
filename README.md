@@ -1,6 +1,7 @@
 # 🎬 AI YouTube Video Summarizer
 
 [![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://youtube-ai-summarizer-b5dpcfisfxvbr3kdb5wdrc.streamlit.app/)
+python -m streamlit run app.py
 
 An AI-powered web application that extracts transcripts from YouTube videos and generates structured summaries, actionable takeaways, and chapter highlights using Google's Gemini models and Streamlit.
 
@@ -26,3 +27,4 @@ An AI-powered web application that extracts transcripts from YouTube videos and 
 ```bash
 git clone [https://github.com/pallaviverma40/youtube-ai-summarizer.git](https://github.com/pallaviverma40/youtube-ai-summarizer.git)
 cd youtube-ai-summarizer
+python -m streamlit run app.py
